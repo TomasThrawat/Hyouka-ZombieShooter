@@ -44,7 +44,7 @@ class GameView(c:Context):View(c){
   px=px.coerceIn(55f,width-55f);py=py.coerceIn(85f,height-55f)
   if(rid>=0){val dx=rx-px;val dy=ry-py;val d=hypot(dx,dy);if(d>10){ax=dx/d;ay=dy/d};if(firing)shoot()}
   b.forEach{it.x+=it.vx*dt;it.y+=it.vy*dt;it.life+=dt};b.removeAll{it.life>1.2||it.x< -80||it.x>width+80||it.y< -80||it.y>height+80}
-  if(spawn<=0&&z.size<min(26,5+wave*2)){spawnZ();spawn=max(.35,1.1-wave*.035)}
+  if(spawn<=0&&z.size<min(26,5+wave*2)){spawnZ();spawn=max(.35f,1.1f-wave*.035f)}
   val dead=ArrayList<Z>()
   z.forEach{q->q.phase+=dt*3;q.hit=max(0f,q.hit-dt);val dx=px-q.x;val dy=py-q.y;val d=max(1f,hypot(dx,dy));val sp=if(q.type==1)70f else if(q.type==2)35f else 45f;if(d>48){q.x+=dx/d*sp*dt;q.y+=dy/d*sp*dt}else hp-=(if(q.type==1)14f else if(q.type==2)8f else 10f)*dt}
   b.forEach{bb->z.forEach{q->if(!dead.contains(q)&&hypot(bb.x-q.x,bb.y-q.y)<38){q.hp--;q.hit=.12f;bb.life=2f;if(q.hp<=0){dead+=q;kills++;score+=if(q.type==1)150 else if(q.type==2)125 else 100;snd.beep(180,40)}}}};z.removeAll(dead)

@@ -5,122 +5,288 @@ import android.opengl.GLES20
 import android.opengl.GLSurfaceView
 import android.opengl.Matrix
 import android.view.MotionEvent
+import kotlin.math.cos
+import kotlin.math.sin
+import kotlin.math.sqrt
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
-import kotlin.math.*
 
 class GameView(context: Context) : GLSurfaceView(context) {
-    private val r = Renderer()
-    private var left = -1
-    private var right = -1
-    private var lx = 0f
-    private var ly = 0f
+    private val renderer = Renderer()
+    private var leftPointer = -1
+    private var rightPointer = -1
+    private var leftX = 0f
+    private var leftY = 0f
+    private var lastLookX = 0f
+    private var lastLookY = 0f
+
+    var onMenuRequested: (() -> Unit)? = null
+
     init {
         setEGLContextClientVersion(2)
-        setRenderer(r)
+        setEGLConfigChooser(8, 8, 8, 8, 24, 0)
+        setRenderer(renderer)
         renderMode = RENDERMODE_CONTINUOUSLY
         isFocusable = true
     }
+
     override fun onTouchEvent(e: MotionEvent): Boolean {
-        when (e.actionMasked) {
+        val action = e.actionMasked
+        val index = e.actionIndex
+        when (action) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
-                val i=e.actionIndex; val id=e.getPointerId(i); val x=e.getX(i)
-                if (x < width*.45f && left<0) left=id else if(right<0){right=id;lx=x;ly=e.getY(i);r.fire=true}
+                val id = e.getPointerId(index)
+                val x = e.getX(index)
+                val y = e.getY(index)
+                if (x > width * 0.88f && y < height * 0.16f) {
+                    onMenuRequested?.invoke()
+                    return true
+                }
+                if (x < width * 0.45f && leftPointer == -1) {
+                    leftPointer = id
+                    leftX = x
+                    leftY = y
+                } else if (x >= width * 0.45f && rightPointer == -1) {
+                    rightPointer = id
+                    lastLookX = x
+                    lastLookY = y
+                }
             }
-            MotionEvent.ACTION_MOVE -> for(i in 0 until e.pointerCount){
-                val id=e.getPointerId(i); val x=e.getX(i); val y=e.getY(i)
-                if(id==left){r.mx=((x-width*.2f)/(width*.16f)).coerceIn(-1f,1f);r.my=((y-height*.7f)/(height*.18f)).coerceIn(-1f,1f)}
-                if(id==right){r.yaw+=(x-lx)*.22f;r.pitch=(r.pitch-(y-ly)*.12f).coerceIn(-35f,35f);lx=x;ly=y}
+            MotionEvent.ACTION_MOVE -> {
+                for (i in 0 until e.pointerCount) {
+                    val id = e.getPointerId(i)
+                    val x = e.getX(i)
+                    val y = e.getY(i)
+                    if (id == leftPointer) {
+                        val dx = ((x - leftX) / (width * 0.18f)).coerceIn(-1f, 1f)
+                        val dy = ((y - leftY) / (height * 0.20f)).coerceIn(-1f, 1f)
+                        renderer.moveX = dx
+                        renderer.moveZ = dy
+                    } else if (id == rightPointer) {
+                        renderer.yaw += (x - lastLookX) * 0.16f
+                        renderer.pitch = (renderer.pitch - (y - lastLookY) * 0.10f).coerceIn(-45f, 45f)
+                        lastLookX = x
+                        lastLookY = y
+                    }
+                }
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_CANCEL -> {
-                val id=if(e.actionMasked==MotionEvent.ACTION_CANCEL) -2 else e.getPointerId(e.actionIndex)
-                if(id==left || e.actionMasked==MotionEvent.ACTION_CANCEL){left=-1;r.mx=0f;r.my=0f}
-                if(id==right || e.actionMasked==MotionEvent.ACTION_CANCEL){right=-1;r.fire=false}
+                val id = if (action == MotionEvent.ACTION_POINTER_UP) e.getPointerId(index) else -1
+                if (id == leftPointer || action == MotionEvent.ACTION_CANCEL) {
+                    leftPointer = -1
+                    renderer.moveX = 0f
+                    renderer.moveZ = 0f
+                }
+                if (id == rightPointer || action == MotionEvent.ACTION_CANCEL) {
+                    rightPointer = -1
+                }
             }
         }
         return true
     }
-}
 
-private class Renderer : GLSurfaceView.Renderer {
-    var mx=0f; var my=0f; var yaw=0f; var pitch=0f; var fire=false
-    private val p=FloatArray(16); private val v=FloatArray(16); private val m=FloatArray(16); private val q=FloatArray(16)
-    private lateinit var sh: Shader
-    private lateinit var cube: Cube
-    private var px=0f; private var pz=8f; private var last=System.nanoTime()
-    private var shot=0f; private var spawn=1f; private var wave=1
-    private val z=ArrayList<Z>()
-    private val rnd=java.util.Random(7)
-    private data class Z(var x:Float,var zz:Float,var hp:Float,var speed:Float,var type:Int)
+    private class Renderer : GLSurfaceView.Renderer {
+        var moveX = 0f
+        var moveZ = 0f
+        var yaw = 0f
+        var pitch = 0f
 
-    override fun onSurfaceCreated(gl:javax.microedition.khronos.opengles.GL10?,c:javax.microedition.khronos.egl.EGLConfig?){
-        GLES20.glClearColor(.01f,.012f,.015f,1f);GLES20.glEnable(GLES20.GL_DEPTH_TEST);GLES20.glEnable(GLES20.GL_CULL_FACE)
-        sh=Shader();cube=Cube();repeat(6){spawnZ()}
+        private val projection = FloatArray(16)
+        private val view = FloatArray(16)
+        private val model = FloatArray(16)
+        private val vp = FloatArray(16)
+        private val mvp = FloatArray(16)
+
+        private lateinit var cube: Cube
+        private lateinit var shader: Shader
+
+        private var px = 0f
+        private var pz = 8f
+        private var lastNs = System.nanoTime()
+
+        private val zombies = arrayListOf(
+            floatArrayOf(-7f, -6f),
+            floatArrayOf(7f, -8f),
+            floatArrayOf(-10f, -15f),
+            floatArrayOf(10f, -18f)
+        )
+
+        override fun onSurfaceCreated(gl: javax.microedition.khronos.opengles.GL10?, config: javax.microedition.khronos.egl.EGLConfig?) {
+            GLES20.glClearColor(0.055f, 0.075f, 0.10f, 1f)
+            GLES20.glEnable(GLES20.GL_DEPTH_TEST)
+            GLES20.glDepthFunc(GLES20.GL_LEQUAL)
+            GLES20.glDisable(GLES20.GL_CULL_FACE)
+            shader = Shader()
+            cube = Cube()
+        }
+
+        override fun onSurfaceChanged(gl: javax.microedition.khronos.opengles.GL10?, width: Int, height: Int) {
+            GLES20.glViewport(0, 0, width, height)
+            val aspect = width.toFloat() / height.coerceAtLeast(1)
+            Matrix.perspectiveM(projection, 0, 68f, aspect, 0.1f, 100f)
+        }
+
+        override fun onDrawFrame(gl: javax.microedition.khronos.opengles.GL10?) {
+            val now = System.nanoTime()
+            val dt = ((now - lastNs) / 1_000_000_000f).coerceIn(0f, 0.05f)
+            lastNs = now
+
+            update(dt)
+
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
+            GLES20.glEnable(GLES20.GL_DEPTH_TEST)
+
+            val yawRad = Math.toRadians(yaw.toDouble()).toFloat()
+            val pitchRad = Math.toRadians(pitch.toDouble()).toFloat()
+            val fx = (sin(yawRad) * cos(pitchRad))
+            val fy = sin(pitchRad)
+            val fz = (-cos(yawRad) * cos(pitchRad))
+
+            Matrix.setLookAtM(
+                view, 0,
+                px, 1.65f, pz,
+                px + fx, 1.65f + fy, pz + fz,
+                0f, 1f, 0f
+            )
+            Matrix.multiplyMM(vp, 0, projection, 0, view, 0)
+
+            shader.use()
+            drawWorld()
+            drawZombies()
+        }
+
+        private fun update(dt: Float) {
+            val speed = 4.0f
+            val yawRad = Math.toRadians(yaw.toDouble()).toFloat()
+            val forwardX = sin(yawRad)
+            val forwardZ = -cos(yawRad)
+            val rightX = cos(yawRad)
+            val rightZ = sin(yawRad)
+
+            val dx = (forwardX * -moveZ + rightX * moveX) * speed * dt
+            val dz = (forwardZ * -moveZ + rightZ * moveX) * speed * dt
+            px = (px + dx).coerceIn(-17.5f, 17.5f)
+            pz = (pz + dz).coerceIn(-17.5f, 17.5f)
+        }
+
+        private fun drawWorld() {
+            // Large floor and four walls, leaving the camera in an open central area.
+            box(0f, -0.35f, 0f, 36f, 0.7f, 36f, 0.16f, 0.20f, 0.16f)
+            box(0f, 2.5f, -18f, 36f, 5f, 0.5f, 0.12f, 0.16f, 0.14f)
+            box(0f, 2.5f, 18f, 36f, 5f, 0.5f, 0.12f, 0.16f, 0.14f)
+            box(-18f, 2.5f, 0f, 0.5f, 5f, 36f, 0.12f, 0.16f, 0.14f)
+            box(18f, 2.5f, 0f, 0.5f, 5f, 36f, 0.12f, 0.16f, 0.14f)
+
+            box(-6f, 1f, -5f, 3f, 2f, 3f, 0.22f, 0.28f, 0.25f)
+            box(7f, 1.25f, -3f, 2.5f, 2.5f, 2.5f, 0.24f, 0.30f, 0.27f)
+            box(-9f, 0.8f, 7f, 4f, 1.6f, 2f, 0.20f, 0.26f, 0.23f)
+        }
+
+        private fun drawZombies() {
+            for (z in zombies) {
+                box(z[0], 1.05f, z[1], 1.1f, 2.1f, 0.75f, 0.30f, 0.42f, 0.30f)
+                box(z[0], 2.55f, z[1], 0.85f, 0.85f, 0.75f, 0.38f, 0.50f, 0.36f)
+            }
+        }
+
+        private fun box(x: Float, y: Float, z: Float, sx: Float, sy: Float, sz: Float, r: Float, g: Float, b: Float) {
+            Matrix.setIdentityM(model, 0)
+            Matrix.translateM(model, 0, x, y, z)
+            Matrix.scaleM(model, 0, sx, sy, sz)
+            Matrix.multiplyMM(mvp, 0, vp, 0, model, 0)
+            shader.color(r, g, b)
+            shader.matrix(mvp)
+            cube.draw(shader.positionHandle)
+        }
     }
-    override fun onSurfaceChanged(gl:javax.microedition.khronos.opengles.GL10?,w:Int,h:Int){
-        GLES20.glViewport(0,0,w,h);Matrix.perspectiveM(p,0,65f,w.toFloat()/max(1,h),.1f,100f)
+
+    private class Shader {
+        private val program: Int
+        val positionHandle: Int
+        private val matrixHandle: Int
+        private val colorHandle: Int
+
+        init {
+            val vs = """
+                uniform mat4 uMVP;
+                attribute vec3 aPosition;
+                void main() {
+                    gl_Position = uMVP * vec4(aPosition, 1.0);
+                }
+            """.trimIndent()
+            val fs = """
+                precision mediump float;
+                uniform vec4 uColor;
+                void main() {
+                    gl_FragColor = uColor;
+                }
+            """.trimIndent()
+
+            val v = compile(GLES20.GL_VERTEX_SHADER, vs)
+            val f = compile(GLES20.GL_FRAGMENT_SHADER, fs)
+            program = GLES20.glCreateProgram()
+            GLES20.glAttachShader(program, v)
+            GLES20.glAttachShader(program, f)
+            GLES20.glLinkProgram(program)
+
+            val status = IntArray(1)
+            GLES20.glGetProgramiv(program, GLES20.GL_LINK_STATUS, status, 0)
+            require(status[0] != 0) { "OpenGL shader link failed" }
+
+            positionHandle = GLES20.glGetAttribLocation(program, "aPosition")
+            matrixHandle = GLES20.glGetUniformLocation(program, "uMVP")
+            colorHandle = GLES20.glGetUniformLocation(program, "uColor")
+        }
+
+        fun use() = GLES20.glUseProgram(program)
+
+        fun matrix(m: FloatArray) = GLES20.glUniformMatrix4fv(matrixHandle, 1, false, m, 0)
+
+        fun color(r: Float, g: Float, b: Float) {
+            GLES20.glUniform4f(colorHandle, r, g, b, 1f)
+        }
+
+        private fun compile(type: Int, source: String): Int {
+            val shader = GLES20.glCreateShader(type)
+            GLES20.glShaderSource(shader, source)
+            GLES20.glCompileShader(shader)
+            val status = IntArray(1)
+            GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, status, 0)
+            require(status[0] != 0) { GLES20.glGetShaderInfoLog(shader) }
+            return shader
+        }
     }
-    override fun onDrawFrame(gl:javax.microedition.khronos.opengles.GL10?){
-        val now=System.nanoTime();val dt=min(.05f,(now-last)/1e9f);last=now;update(dt)
-        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
-        val y=Math.toRadians(yaw.toDouble()).toFloat();val pp=Math.toRadians(pitch.toDouble()).toFloat()
-        val fx=sin(y)*cos(pp);val fy=sin(pp);val fz=-cos(y)*cos(pp)
-        Matrix.setLookAtM(v,0,px,1.65f,pz,px+fx,1.65f+fy,pz+fz,0f,1f,0f)
-        sh.use(); world(); gun()
-    }
-    private fun update(dt:Float){
-        val y=Math.toRadians(yaw.toDouble()).toFloat();val fx=sin(y);val fz=-cos(y);val rx=cos(y);val rz=sin(y)
-        px+=(fx*-my+rx*mx)*4.2f*dt;pz+=(fz*-my+rz*mx)*4.2f*dt
-        px=px.coerceIn(-18f,18f);pz=pz.coerceIn(-18f,18f)
-        spawn-=dt;if(spawn<=0&&z.size<5+wave*2){spawnZ();spawn=max(.35f,1.1f-wave*.03f)}
-        for(a in z){val dx=px-a.x;val dz=pz-a.zz;val d=hypot(dx,dz).coerceAtLeast(.001f);if(d>1.4f){a.x+=dx/d*a.speed*dt;a.zz+=dz/d*a.speed*dt}}
-        shot-=dt;if(fire&&shot<=0){shoot();shot=.16f}
-        if(z.isEmpty()){wave++;repeat(min(3+wave,10)){spawnZ()}}
-    }
-    private fun spawnZ(){val a=rnd.nextFloat()*16f-8f;val e=rnd.nextInt(4);val x:Float;val zz:Float
-        when(e){0->{x=-18f;zz=a};1->{x=18f;zz=a};2->{x=a;zz=-18f};else->{x=a;zz=18f}}
-        val t=rnd.nextInt(3);z.add(Z(x,zz,2f+t*1.5f,.8f+t*.35f,t))
-    }
-    private fun shoot(){
-        val y=Math.toRadians(yaw.toDouble()).toFloat();val pp=Math.toRadians(pitch.toDouble()).toFloat()
-        val dx=sin(y)*cos(pp);val dy=sin(pp);val dz=-cos(y)*cos(pp);var hit:Z?=null;var bt=999f
-        for(a in z){val vx=a.x-px;val vy=1.2f;val vz=a.zz-pz;val t=vx*dx+vy*dy+vz*dz;if(t<=0||t>=bt)continue
-            val ax=px+dx*t;val ay=1.65f+dy*t;val az=pz+dz*t;val d=sqrt((a.x-ax).pow(2)+(1.2f-ay).pow(2)+(a.zz-az).pow(2))
-            if(d<1.1f){hit=a;bt=t}}
-        hit?.let{it.hp-=1f;if(it.hp<=0)z.remove(it)}
-    }
-    private fun world(){
-        box(0f,-.5f,0f,40f,1f,40f,.09f,.1f,.12f)
-        box(0f,3f,-20f,40f,6f,1f,.06f,.07f,.08f);box(-20f,3f,0f,1f,6f,40f,.07f,.08f,.09f)
-        box(20f,3f,0f,1f,6f,40f,.07f,.08f,.09f);box(0f,3f,20f,40f,6f,1f,.06f,.07f,.08f)
-        repeat(7){i->box(-9+i*3f,1f,-5f,1.5f,2f,3f,.22f,.23f,.25f)}
-        repeat(6){i->box(-8+i*3.2f,1.1f,7f,2f,2.2f,2f,.14f,.2f,.16f)}
-        for(a in z){val c=when(a.type){0->floatArrayOf(.22f,.62f,.25f);1->floatArrayOf(.62f,.23f,.18f);else->floatArrayOf(.52f,.18f,.62f)}
-            box(a.x,1.05f,a.zz,1f,2.1f,.8f,c[0],c[1],c[2]);box(a.x,2.35f,a.zz,.72f,.72f,.72f,.7f,.72f,.58f)
-            box(a.x-.38f,1.15f,a.zz,.25f,1.3f,.35f,c[0]*.8f,c[1]*.8f,c[2]*.8f);box(a.x+.38f,1.15f,a.zz,.25f,1.3f,.35f,c[0]*.8f,c[1]*.8f,c[2]*.8f)}
-    }
-    private fun gun(){val y=Math.toRadians(yaw.toDouble()).toFloat();box(px+sin(y)*.65f+cos(y)*.35f,1.25f,pz-cos(y)*.65f+sin(y)*.35f,.32f,.28f,1.35f,.05f,.05f,.06f)}
-    private fun box(x:Float,y:Float,z:Float,sx:Float,sy:Float,sz:Float,r:Float,g:Float,b:Float){
-        Matrix.setIdentityM(m,0);Matrix.translateM(m,0,x,y,z);Matrix.scaleM(m,0,sx,sy,sz);Matrix.multiplyMM(q,0,v,0,m,0);Matrix.multiplyMM(q,0,p,0,q,0)
-        sh.color(r,g,b);sh.matrix(q);cube.draw(sh.pos())
-    }
-    private class Shader{
-        private val prog:Int;private val ap:Int;private val um:Int;private val uc:Int
-        init{val vs="uniform mat4 uM;attribute vec3 aP;void main(){gl_Position=uM*vec4(aP,1.0);}"
-            val fs="precision mediump float;uniform vec4 uC;void main(){gl_FragColor=uC;}"
-            prog=GLES20.glCreateProgram();val a=compile(GLES20.GL_VERTEX_SHADER,vs);val b=compile(GLES20.GL_FRAGMENT_SHADER,fs)
-            GLES20.glAttachShader(prog,a);GLES20.glAttachShader(prog,b);GLES20.glLinkProgram(prog);ap=GLES20.glGetAttribLocation(prog,"aP");um=GLES20.glGetUniformLocation(prog,"uM");uc=GLES20.glGetUniformLocation(prog,"uC")}
-        private fun compile(t:Int,s:String):Int{val x=GLES20.glCreateShader(t);GLES20.glShaderSource(x,s);GLES20.glCompileShader(x);return x}
-        fun use(){GLES20.glUseProgram(prog);GLES20.glEnableVertexAttribArray(ap)}
-        fun color(r:Float,g:Float,b:Float){GLES20.glUniform4f(uc,r.coerceIn(0f,1f),g.coerceIn(0f,1f),b.coerceIn(0f,1f),1f)}
-        fun matrix(x:FloatArray){GLES20.glUniformMatrix4fv(um,1,false,x,0)}
-        fun pos()=ap
-    }
-    private class Cube{
-        private val b:FloatBuffer
-        private val v=floatArrayOf(-1f,-1f,1f,1f,-1f,1f,1f,1f,1f,-1f,1f,1f,-1f,-1f,-1f,-1f,1f,-1f,1f,1f,-1f,1f,-1f,-1f,-1f,1f,-1f,-1f,1f,1f,1f,1f,1f,1f,1f,-1f,-1f,-1f,1f,-1f,-1f,1f,-1f,1f,-1f,-1f,1f,1f,-1f,-1f,1f,1f,-1f,1f,1f,1f,1f,-1f,1f,-1f,-1f,-1f,-1f,-1f,1f,-1f,1f,1f,-1f,1f,1f)
-        init{b=ByteBuffer.allocateDirect(v.size*4).order(ByteOrder.nativeOrder()).asFloatBuffer();b.put(v).position(0)}
-        fun draw(s:Int){b.position(0);GLES20.glVertexAttribPointer(s,3,GLES20.GL_FLOAT,false,0,b);repeat(6){GLES20.glDrawArrays(GLES20.GL_TRIANGLE_FAN,it*4,4)}}
+
+    private class Cube {
+        private val buffer: FloatBuffer
+        init {
+            val vertices = floatArrayOf(
+                -1f,-1f,1f,  1f,-1f,1f,  1f,1f,1f,
+                -1f,-1f,1f,  1f,1f,1f, -1f,1f,1f,
+                1f,-1f,1f,  1f,-1f,-1f, 1f,1f,-1f,
+                1f,-1f,1f,  1f,1f,-1f, 1f,1f,1f,
+                1f,-1f,-1f, -1f,-1f,-1f, -1f,1f,-1f,
+                1f,-1f,-1f, -1f,1f,-1f, 1f,1f,-1f,
+                -1f,-1f,-1f, -1f,-1f,1f, -1f,1f,1f,
+                -1f,-1f,-1f, -1f,1f,1f, -1f,1f,-1f,
+                -1f,1f,1f, 1f,1f,1f, 1f,1f,-1f,
+                -1f,1f,1f, 1f,1f,-1f, -1f,1f,-1f,
+                -1f,-1f,-1f, 1f,-1f,-1f, 1f,-1f,1f,
+                -1f,-1f,-1f, 1f,-1f,1f, -1f,-1f,1f
+            )
+            buffer = ByteBuffer.allocateDirect(vertices.size * 4)
+                .order(ByteOrder.nativeOrder())
+                .asFloatBuffer()
+            buffer.put(vertices).position(0)
+        }
+
+        fun draw(positionHandle: Int) {
+            buffer.position(0)
+            GLES20.glEnableVertexAttribArray(positionHandle)
+            GLES20.glVertexAttribPointer(positionHandle, 3, GLES20.GL_FLOAT, false, 0, buffer)
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, 36)
+            GLES20.glDisableVertexAttribArray(positionHandle)
+        }
     }
 }
